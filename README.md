@@ -46,6 +46,13 @@ environment or an `ant auth login` profile.
   loop caches its own growing history the same way. `/usage` itemizes
   uncached input, cache writes (1.25x), and cache reads (0.1x) per model.
 
+## Verified working
+
+[`LIVE-TEST.md`](LIVE-TEST.md) is an unedited transcript of a real `/goal` +
+`/loop` run against the live API: the orchestrator delegated, the worker
+built and tested the code, and the independent verifier *mutation-tested*
+the completion claim before the loop accepted it — 1 iteration, $0.23.
+
 ## Autonomous mode: `/goal` + `/loop`
 
 Set a standing objective, then let the council pursue it without you:
