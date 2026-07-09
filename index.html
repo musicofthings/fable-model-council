@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Model Council — a three-tier Claude harness</title>
+<meta name="description" content="Model Council is an interactive CLI that orchestrates three tiers of Claude models: a Fable 5 orchestrator, an Opus 4.8 worker with shell access, and a Sonnet 5 routine tier.">
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --cyan: #58d3f7;
+    --yellow: #e3b341;
+    --magenta: #d2a8ff;
+    --green: #7ee787;
+    --accent: #58a6ff;
+    --mono: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa;
+      --bg-soft: #ffffff;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --muted: #59636e;
+      --cyan: #0969da;
+      --yellow: #9a6700;
+      --magenta: #8250df;
+      --green: #1a7f37;
+      --accent: #0969da;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+
+  header { padding: 72px 0 48px; text-align: center; }
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 14px;
+    margin-bottom: 20px;
+  }
+  h1 { font-size: 44px; line-height: 1.15; letter-spacing: -0.02em; }
+  h1 .accent { color: var(--accent); }
+  .tagline { color: var(--muted); font-size: 19px; max-width: 620px; margin: 16px auto 0; }
+  .cta-row { margin-top: 32px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    font-size: 15px;
+    font-weight: 600;
+    text-decoration: none;
+    border-radius: 8px;
+    padding: 10px 22px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    background: var(--bg-soft);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:hover { filter: brightness(1.1); }
+
+  .terminal {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin: 48px auto 0;
+    max-width: 760px;
+    text-align: left;
+    overflow-x: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,.35);
+  }
+  .terminal-bar {
+    display: flex; gap: 7px; padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .terminal-bar span { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .dot-r { background: #ff5f56; } .dot-y { background: #ffbd2e; } .dot-g { background: #27c93f; }
+  .terminal pre {
+    padding: 18px 20px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: #e6edf3;
+    white-space: pre;
+  }
+  .t-cyan { color: #58d3f7; } .t-yellow { color: #e3b341; }
+  .t-magenta { color: #d2a8ff; } .t-dim { color: #6e7681; }
+  .t-bold { font-weight: 700; } .t-green { color: #7ee787; }
+
+  section { padding: 56px 0 8px; }
+  h2 { font-size: 26px; margin-bottom: 24px; letter-spacing: -0.01em; }
+  h2 .hash { color: var(--muted); font-family: var(--mono); font-weight: 400; margin-right: 6px; }
+
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .tier {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px;
+  }
+  .tier .role { font-family: var(--mono); font-size: 13px; margin-bottom: 6px; }
+  .tier.orch .role { color: var(--cyan); }
+  .tier.work .role { color: var(--yellow); }
+  .tier.rout .role { color: var(--magenta); }
+  .tier h3 { font-size: 18px; margin-bottom: 8px; }
+  .tier .alt { font-size: 13px; color: var(--muted); font-family: var(--mono); margin-bottom: 10px; }
+  .tier p { font-size: 14.5px; color: var(--muted); }
+
+  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .feature {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+  .feature h3 { font-size: 16px; margin-bottom: 6px; }
+  .feature p { font-size: 14px; color: var(--muted); }
+  .feature code {
+    font-family: var(--mono); font-size: 12.5px;
+    background: rgba(110,118,129,.18);
+    border-radius: 4px; padding: 1px 5px;
+  }
+
+  .codeblock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow-x: auto;
+  }
+  .codeblock pre {
+    padding: 16px 20px;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.7;
+  }
+  .codeblock .cmt { color: var(--muted); }
+  .codeblock .kw { color: var(--green); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  td code { font-family: var(--mono); font-size: 13px; }
+  .table-wrap { overflow-x: auto; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; }
+  .table-wrap table { border-collapse: separate; border-spacing: 0; }
+  .table-wrap tr:last-child td { border-bottom: none; }
+
+  footer {
+    margin-top: 72px;
+    padding: 32px 0 48px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 14px;
+    text-align: center;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <div class="badge">python council.py</div>
+  <h1>Model <span class="accent">Council</span></h1>
+  <p class="tagline">
+    A three-tier Claude harness in a single Python file. A frontier orchestrator plans and
+    routes; an autonomous worker gets a shell; a fast routine tier handles the busywork.
+  </p>
+  <div class="cta-row">
+    <a class="btn primary" href="https://github.com/musicofthings/fable-model-council">View on GitHub</a>
+    <a class="btn" href="#quickstart">Quick start</a>
+  </div>
+
+  <div class="terminal">
+    <div class="terminal-bar"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></div>
+    <pre><span class="t-bold">Council setup</span> — pick a model for each role, and a workspace:
+  orchestrator [1] Fable 5 ($10/$50 per 1M)  [2] Opus 4.8 ($5/$25 per 1M)  [default 1]:
+  worker       [1] Opus 4.8 ($5/$25 per 1M)  [2] Sonnet 5 ($3/$15 per 1M)  [default 1]:
+  routine      [1] Sonnet 5 ($3/$15 per 1M)  [2] Haiku 4.5 ($1/$5 per 1M)  [default 1]:
+  workspace    [~/council-workspace]:
+
+<span class="t-bold">Model Council</span>
+  orchestrator <span class="t-cyan">claude-fable-5</span>   worker <span class="t-yellow">claude-opus-4-8</span>   routine <span class="t-magenta">claude-sonnet-5</span>
+  workspace: ~/council-workspace   parallel subagents: up to 4
+  commands: /usage  /reset  /quit
+
+<span class="t-bold">you></span> build and test a fizzbuzz CLI, then draft release notes
+<span class="t-dim">Delegating the build to the worker and the notes to the routine tier…</span>
+
+<span class="t-bold">▶ running 2 council tasks in parallel</span>
+<span class="t-dim">[w1]</span> <span class="t-yellow">▶ worker started (effort=xhigh): Build a fizzbuzz CLI in Python with tests…</span>
+<span class="t-dim">[w2]</span> <span class="t-magenta">▶ routine task: Draft short release notes for a new fizzbuzz CLI…</span>
+<span class="t-dim">[w1]   $ python -m pytest test_fizzbuzz.py -q</span>
+<span class="t-dim">[w1]</span> <span class="t-green">✔ worker finished</span>
+<span class="t-dim">[w2]</span> <span class="t-green">✔ routine task finished</span></pre>
+  </div>
+</header>
+
+<section class="wrap" id="tiers">
+  <h2><span class="hash">#</span>The council</h2>
+  <div class="tiers">
+    <div class="tier orch">
+      <div class="role">orchestrator</div>
+      <h3>Fable 5</h3>
+      <div class="alt">or Opus 4.8</div>
+      <p>Talks to you, plans, routes work to the right tier, verifies results before reporting
+         them, and synthesizes everything back into one answer.</p>
+    </div>
+    <div class="tier work">
+      <div class="role">worker</div>
+      <h3>Opus 4.8</h3>
+      <div class="alt">or Sonnet 5</div>
+      <p>An autonomous agent with bash and a text editor, path-confined to its own workspace.
+         Writes code, runs commands, and reports back with evidence.</p>
+    </div>
+    <div class="tier rout">
+      <div class="role">routine</div>
+      <h3>Sonnet 5</h3>
+      <div class="alt">or Haiku 4.5</div>
+      <p>Fast, cheap, tool-free text tasks: drafts, summaries, rewrites, reformatting,
+         classification, boilerplate.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="features">
+  <h2><span class="hash">#</span>Features</h2>
+  <div class="features">
+    <div class="feature">
+      <h3>Interactive model picker</h3>
+      <p>Choose a model per role at startup. Prompts, tool descriptions, pricing, and
+         fallback wiring all adapt to the selection.</p>
+    </div>
+    <div class="feature">
+      <h3>Parallel subagents</h3>
+      <p>Tool calls issued in one orchestrator turn run concurrently, with tagged,
+         line-buffered progress (<code>[w1]</code>, <code>[s2.t1]</code>) instead of
+         interleaved streams.</p>
+    </div>
+    <div class="feature">
+      <h3>Dynamic workflows</h3>
+      <p>The <code>run_workflow</code> tool executes multi-stage pipelines composed at
+         runtime — tasks within a stage run in parallel, and later stages automatically
+         receive all earlier outputs.</p>
+    </div>
+    <div class="feature">
+      <h3>Prompt caching</h3>
+      <p>A rotating window of cache breakpoints follows the growing conversation, and the
+         worker's inner loop caches its own history. <code>/usage</code> itemizes cache
+         reads and writes per model.</p>
+    </div>
+    <div class="feature">
+      <h3>Refusal fallbacks</h3>
+      <p>A Fable 5 orchestrator ships with server-side fallbacks to Opus 4.8, so a
+         safety-classifier false positive is transparently re-served instead of failing
+         the turn.</p>
+    </div>
+    <div class="feature">
+      <h3>Sandboxed worker</h3>
+      <p>Point the council at any folder on your machine at startup
+         (default <code>~/council-workspace</code>) — file edits are path-confined to it,
+         and shell commands run under Git Bash with a 180&nbsp;s timeout.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="quickstart">
+  <h2><span class="hash">#</span>Quick start</h2>
+  <div class="codeblock">
+    <pre><span class="cmt"># requires Python 3.10+ and anthropic>=0.116</span>
+<span class="kw">pip</span> install anthropic
+
+<span class="cmt"># auth: ANTHROPIC_API_KEY env var, or an `ant auth login` profile</span>
+<span class="kw">git</span> clone https://github.com/musicofthings/fable-model-council.git
+<span class="kw">cd</span> fable-model-council
+<span class="kw">python</span> council.py</pre>
+  </div>
+</section>
+
+<section class="wrap" id="pricing">
+  <h2><span class="hash">#</span>Models &amp; pricing</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Roles</th><th>Input / 1M</th><th>Output / 1M</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>claude-fable-5</code></td><td>orchestrator</td><td>$10.00</td><td>$50.00</td></tr>
+        <tr><td><code>claude-opus-4-8</code></td><td>orchestrator · worker</td><td>$5.00</td><td>$25.00</td></tr>
+        <tr><td><code>claude-sonnet-5</code></td><td>worker · routine</td><td>$3.00</td><td>$15.00</td></tr>
+        <tr><td><code>claude-haiku-4-5</code></td><td>routine</td><td>$1.00</td><td>$5.00</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="color: var(--muted); font-size: 13.5px; margin-top: 12px;">
+    Sonnet 5 has introductory pricing of $2/$10 through 2026-08-31. Fable 5 requires 30-day
+    data retention on your org. The in-REPL <code style="font-family: var(--mono);">/usage</code>
+    command keeps an approximate running tally per model, including cache reads and writes.
+  </p>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      <a href="https://github.com/musicofthings/fable-model-council">github.com/musicofthings/fable-model-council</a>
+      &nbsp;·&nbsp; built on the <a href="https://platform.claude.com/docs">Claude API</a>
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
