@@ -76,6 +76,9 @@ you> /loop 10 2.50        # up to 10 iterations, stop if loop spend exceeds $2.5
 
 - `/goal` — set/show the standing goal (`/goal clear` to unset)
 - `/loop [n] [budget]` — pursue the goal autonomously (see above)
+- `/save [name]` — write history + goal to a JSON file in the workspace
+  (default `council-session.json`)
+- `/resume [name]` — restore a saved session, goal included
 - `/usage` — approximate token/cost tally per model
 - `/reset` — clear conversation history (keeps the goal)
 - `/quit` — exit (prints the session tally)

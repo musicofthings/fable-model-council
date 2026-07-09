@@ -32,6 +32,9 @@ Commands inside the REPL:
              each iteration the orchestrator reviews progress, delegates work to
              the cheaper tiers, and checks results; an "achieved" claim must
              survive an independent fresh-context verifier before the loop stops
+    /save    write history + goal to a JSON file in the workspace
+             (/save [name], default council-session.json)
+    /resume  restore a saved session (/resume [name])
     /usage   token/cost tally so far
     /reset   clear conversation history (keeps the goal)
     /quit    exit
@@ -874,6 +877,65 @@ def run_goal_loop(history: list, arg: str) -> None:
           "the goal stays set; run /loop again to continue")
 
 
+# ---------------------------------------------------------------- session persistence
+
+def session_file(arg: str) -> Path:
+    name = arg.strip() or "council-session.json"
+    if not name.endswith(".json"):
+        name += ".json"
+    p = Path(name)
+    return p if p.is_absolute() else WORKSPACE / name
+
+
+def save_session(history: list, arg: str) -> None:
+    """Serialize history (+ goal and models) to JSON in the workspace."""
+    ser = []
+    for m in history:
+        content = m["content"]
+        if isinstance(content, list):
+            content = [
+                b if isinstance(b, dict) else b.model_dump(mode="json", exclude_none=True)
+                for b in content
+            ]
+        ser.append({"role": m["role"], "content": content})
+    path = session_file(arg)
+    path.write_text(
+        json.dumps(
+            {
+                "goal": GOAL,
+                "models": [ORCHESTRATOR_MODEL, WORKER_MODEL, ROUTINE_MODEL],
+                "history": ser,
+            },
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
+    print(f"(saved {len(ser)} message(s) to {path})")
+
+
+def load_session(history: list, arg: str) -> None:
+    global GOAL
+    path = session_file(arg)
+    if not path.exists():
+        print(f"no session file at {path}")
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"couldn't load session: {e}")
+        return
+    history.clear()
+    history.extend(data.get("history", []))
+    GOAL = data.get("goal")
+    saved_models = data.get("models", [])
+    current = [ORCHESTRATOR_MODEL, WORKER_MODEL, ROUTINE_MODEL]
+    print(f"(resumed {len(history)} message(s) from {path}"
+          + (f", goal: {GOAL}" if GOAL else "") + ")")
+    if saved_models and saved_models != current:
+        print(f"  note: session was saved with {', '.join(saved_models)}; "
+              "thinking blocks from other models are dropped by the API, which is fine")
+
+
 # ---------------------------------------------------------------- CLI
 
 def print_usage_tally() -> None:
@@ -955,7 +1017,7 @@ def main() -> None:
           f"worker {YELLOW}{WORKER_MODEL}{RESET}   "
           f"routine {MAGENTA}{ROUTINE_MODEL}{RESET}")
     print(f"  workspace: {WORKSPACE}   parallel subagents: up to {MAX_PARALLEL}")
-    print("  commands: /goal  /loop  /usage  /reset  /quit\n")
+    print("  commands: /goal  /loop  /save  /resume  /usage  /reset  /quit\n")
 
     global GOAL
     history: list = []
@@ -990,6 +1052,15 @@ def main() -> None:
             continue
         if user == "/loop" or user.startswith("/loop "):
             run_goal_loop(history, user[len("/loop"):].strip())
+            continue
+        if user == "/save" or user.startswith("/save "):
+            try:
+                save_session(history, user[len("/save"):])
+            except OSError as e:
+                print(f"couldn't save session: {e}")
+            continue
+        if user == "/resume" or user.startswith("/resume "):
+            load_session(history, user[len("/resume"):])
             continue
 
         checkpoint = len(history)
