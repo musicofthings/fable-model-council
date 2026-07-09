@@ -42,6 +42,9 @@ Commands inside the REPL:
              each iteration the orchestrator reviews progress, delegates work to
              the cheaper tiers, and checks results; an "achieved" claim must
              survive an independent fresh-context verifier before the loop stops
+    /memory  show the council memory file (MEMORY.md)
+    /reload  re-read MEMORY.md and mcp.json into the system prompts mid-session
+             (costs one prompt-cache rebuild on the next request)
     /save    write history + goal to a JSON file in the workspace
              (/save [name], default council-session.json)
     /resume  restore a saved session (/resume [name])
@@ -1111,7 +1114,7 @@ def main() -> None:
         else "mcp: none (add mcp.json to the workspace)"
     )
     print(f"  {'   '.join(extras)}")
-    print("  commands: /goal  /loop  /memory  /save  /resume  /usage  /reset  /quit\n")
+    print("  commands: /goal  /loop  /memory  /reload  /save  /resume  /usage  /reset  /quit\n")
 
     global GOAL
     history: list = []
@@ -1136,6 +1139,14 @@ def main() -> None:
             mem = read_memory()
             print(mem if mem else "(no MEMORY.md in the workspace yet — "
                   "workers create it as they learn things)")
+            continue
+        if user == "/reload":
+            load_mcp_config()
+            configure_council(ORCHESTRATOR_MODEL, WORKER_MODEL, ROUTINE_MODEL)
+            print("(reloaded MEMORY.md and mcp.json into the system prompts — "
+                  f"memory: {'loaded' if read_memory() else 'none'}, "
+                  f"mcp: {', '.join(s['name'] for s in MCP_SERVERS) or 'none'}; "
+                  "note: this rebuilds the prompt cache on the next request)")
             continue
         if user == "/goal" or user.startswith("/goal "):
             arg = user[len("/goal"):].strip()

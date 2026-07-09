@@ -81,6 +81,11 @@ worker's system prompts at setup, so successive sessions on the same workspace
 compound instead of starting cold. `/memory` shows the current contents
 (clipped to 6 KB when injected).
 
+Memory and MCP config are read once at setup to keep the prompt cache stable.
+If workers add learnings (or you edit `mcp.json`) mid-session, run `/reload`
+to fold the fresh contents into the system prompts — it costs one prompt-cache
+rebuild on the next request.
+
 ## Tools & connectors
 
 - **Web research** — the worker carries server-side `web_search` and
@@ -105,6 +110,8 @@ compound instead of starting cold. `/memory` shows the current contents
 - `/goal` — set/show the standing goal (`/goal clear` to unset)
 - `/loop [n] [budget]` — pursue the goal autonomously (see above)
 - `/memory` — show the council memory file
+- `/reload` — re-read `MEMORY.md` and `mcp.json` into the system prompts
+  mid-session (one prompt-cache rebuild)
 - `/save [name]` — write history + goal to a JSON file in the workspace
   (default `council-session.json`)
 - `/resume [name]` — restore a saved session, goal included
