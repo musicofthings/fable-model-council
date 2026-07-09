@@ -27,8 +27,13 @@ Config (env vars):
     COUNCIL_MAX_PARALLEL   max concurrent subagents (default 4)
 
 Commands inside the REPL:
+    /goal    set/show the standing goal (/goal clear to unset)
+    /loop    pursue the goal autonomously: /loop [max_iterations] [budget_usd]
+             each iteration the orchestrator reviews progress, delegates work to
+             the cheaper tiers, and checks results; an "achieved" claim must
+             survive an independent fresh-context verifier before the loop stops
     /usage   token/cost tally so far
-    /reset   clear conversation history
+    /reset   clear conversation history (keeps the goal)
     /quit    exit
 """
 
@@ -104,6 +109,9 @@ CACHE_MARKERS_PER_CONVO = 3      # rotating message breakpoints (+1 on system = 
 DIM, RESET, BOLD = "\x1b[2m", "\x1b[0m", "\x1b[1m"
 CYAN, YELLOW, MAGENTA = "\x1b[36m", "\x1b[33m", "\x1b[35m"
 
+GOAL: str | None = None            # standing goal, set via /goal
+LOOP_STATE = {"finished": None}    # set by finish_goal: (status, summary)
+
 client = anthropic.Anthropic()
 
 # ---------------------------------------------------------------- output & usage
@@ -131,6 +139,17 @@ def track(model: str, u) -> None:
         row[1] += getattr(u, "cache_creation_input_tokens", 0) or 0
         row[2] += getattr(u, "cache_read_input_tokens", 0) or 0
         row[3] += u.output_tokens or 0
+
+
+def row_cost(model: str, row: list[int]) -> float:
+    pin, pout = PRICES.get(model, PRICES[ORCHESTRATOR_MODEL])
+    unc, cw, cr, out = row
+    return (unc * pin + cw * 1.25 * pin + cr * 0.10 * pin + out * pout) / 1e6
+
+
+def total_cost() -> float:
+    with _usage_lock:
+        return sum(row_cost(m, row) for m, row in _usage.items())
 
 
 def clip(s: str) -> str:
@@ -208,6 +227,7 @@ Your council:
 - delegate_task -> Claude {wname}, an autonomous worker with shell and file access confined to {WORKSPACE}. Use it for substantive hands-on work: writing or editing code, running commands, analyzing files, multi-step builds. It works best from ONE complete brief — include the goal, all relevant context, constraints, and what "done" looks like, rather than drip-feeding instructions.
 - quick_task -> Claude {rname}, fast and cheap, no tools. Use it for routine text work: drafting messages or emails, summaries, rewrites, reformatting, boilerplate, classification.
 - run_workflow -> a multi-stage pipeline engine. Stages run in sequence; the tasks inside a stage run in parallel, and every later stage automatically receives the outputs of all earlier stages. Use it for fan-out/fan-in patterns (e.g. three parallel research tasks, then one synthesis task) instead of sequencing many turns yourself.
+- finish_goal -> declare the user's standing goal achieved or blocked. An "achieved" claim is audited by an independent fresh-context verifier before it counts; if the verifier refutes it, its findings come back to you as more work.
 
 You yourself have no file or shell access — anything hands-on goes through the tools.
 
@@ -218,6 +238,7 @@ How to work:
 - Parallel workers share one workspace: never assign two concurrent tasks that write the same files.
 - When a worker reports back, check the result actually addresses the task before telling the user it's done. Report failures honestly, with the evidence the worker gave.
 - When you have enough information to act, act. If weighing a choice, give a recommendation, not a survey.
+- When a standing goal is set (it appears in a <council-goal> reminder), keep every turn pointed at it. In autonomous loop turns the user is away: never ask questions — decide, delegate, and verify. Only call finish_goal "achieved" when you have concrete evidence the goal is fully met, and "blocked" only when work truly cannot proceed without the user.
 - Lead your replies with the outcome. Write readable prose, not fragments."""
 
     task_spec = {
@@ -309,6 +330,36 @@ How to work:
                     }
                 },
                 "required": ["stages"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "finish_goal",
+            "description": (
+                "Declare the user's standing goal finished. Use status \"achieved\" ONLY "
+                "when you have concrete evidence the goal is fully met — an independent "
+                "fresh-context verifier then audits the claim against the workspace, and "
+                "if it refutes you its findings come back as more work. Use status "
+                "\"blocked\" when the goal cannot proceed without the user. Never call "
+                "this when no standing goal is set."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["achieved", "blocked"]},
+                    "summary": {
+                        "type": "string",
+                        "description": "1-3 sentences: what was accomplished, or what is blocking.",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "Concrete evidence for an achieved claim: files created, "
+                            "tests run and their output, checks performed."
+                        ),
+                    },
+                },
+                "required": ["status", "summary"],
                 "additionalProperties": False,
             },
         },
@@ -546,6 +597,67 @@ def run_workflow_tool(inp: dict) -> str:
     return "\n\n".join(transcript)
 
 
+# ---------------------------------------------------------------- goal & verifier
+
+def verifier_brief(summary: str, evidence: str) -> str:
+    return f"""You are an independent verifier for a model council. Another agent claims a goal is complete; your job is to try to REFUTE that claim.
+
+Standing goal: {GOAL}
+
+Claim: {summary}
+
+Evidence offered: {evidence or "(none provided)"}
+
+Audit the claim inside your workspace with fresh eyes. Do not trust the claim or the evidence — re-derive everything: read the relevant files, run the tests or commands yourself, and hunt for unmet parts of the goal, missing files, or broken behavior. Be strict: partially done is not done.
+
+End your report with exactly one line:
+VERDICT: CONFIRMED
+or
+VERDICT: REFUTED"""
+
+
+def handle_finish_goal(inp: dict) -> str:
+    status, summary = inp.get("status"), inp.get("summary", "")
+    if not GOAL:
+        return "Error: no standing goal is set — nothing to finish."
+    if status == "blocked":
+        LOOP_STATE["finished"] = ("blocked", summary)
+        return ("Acknowledged as blocked. The autonomous loop will stop; tell the user "
+                "plainly what is blocking and what you need from them.")
+    emit("⚖ independent verifier auditing the completion claim...", CYAN)
+    verdict = run_worker(
+        verifier_brief(summary, inp.get("evidence", "")), effort="high", quiet=True
+    )
+    if "VERDICT: CONFIRMED" in verdict:
+        LOOP_STATE["finished"] = ("achieved", summary)
+        return ("Independent verification PASSED — the goal is confirmed complete. "
+                "Write the final summary for the user now.\n\nVerifier report:\n" + verdict)
+    return ("Independent verification did NOT confirm completion. Keep working on the "
+            "gaps it found before claiming the goal again.\n\nVerifier report:\n" + verdict)
+
+
+def goal_reminder_message() -> dict | None:
+    """Transient per-request reminder of the standing goal (never stored in history)."""
+    if not GOAL:
+        return None
+    text = (
+        "<council-goal>\n"
+        f"Standing goal: {GOAL}\n"
+        "Keep this turn pointed at the goal and verify results against it. When it is "
+        'fully achieved call finish_goal (status "achieved"); if it cannot proceed '
+        'without the user call finish_goal (status "blocked").\n'
+        "</council-goal>"
+    )
+    if ORCHESTRATOR_MODEL == "claude-opus-4-8":
+        # Opus 4.8 supports mid-conversation system messages (operator channel).
+        return {"role": "system", "content": text}
+    # Fable 5 doesn't; fall back to a system-reminder block in a user turn.
+    return {
+        "role": "user",
+        "content": [{"type": "text", "text": f"<system-reminder>\n{text}\n</system-reminder>"}],
+    }
+
+
 # ---------------------------------------------------------------- tool dispatch
 
 def dispatch_tool(tu, quiet: bool, tag: str) -> dict:
@@ -557,6 +669,8 @@ def dispatch_tool(tu, quiet: bool, tag: str) -> dict:
             out = run_routine(tu.input["prompt"], quiet=quiet)
         elif tu.name == "run_workflow":
             out = run_workflow_tool(tu.input)
+        elif tu.name == "finish_goal":
+            out = handle_finish_goal(tu.input)
         else:
             return {
                 "type": "tool_result",
@@ -632,6 +746,12 @@ def orchestrator_turn(history: list) -> None:
     )
     for _ in range(ORCH_MAX_ITERATIONS):
         refresh_cache_markers(history)
+        # Standing goal rides along as a transient trailing message — after the
+        # cached prefix, never stored in history.
+        request_messages = history
+        reminder = goal_reminder_message()
+        if reminder and history and history[-1].get("role") == "user":
+            request_messages = history + [reminder]
         with client.beta.messages.stream(
             model=ORCHESTRATOR_MODEL,
             max_tokens=32000,
@@ -647,7 +767,7 @@ def orchestrator_turn(history: list) -> None:
                 }
             ],
             tools=ORCH_TOOLS,
-            messages=history,
+            messages=request_messages,
         ) as stream:
             for event in stream:
                 if event.type == "content_block_delta":
@@ -687,6 +807,73 @@ def orchestrator_turn(history: list) -> None:
     print("[orchestrator hit the iteration limit for this turn]")
 
 
+# ---------------------------------------------------------------- autonomous loop
+
+def loop_turn_prompt(k: int, n: int) -> str:
+    return (
+        f"[Autonomous loop — iteration {k} of {n}. The user is not watching; do not ask "
+        "questions or wait for input.] Review progress toward the standing goal, "
+        "delegate the next round of work to the council, and check the results against "
+        "the goal. If you have verified the goal is fully achieved, call finish_goal "
+        'with status "achieved"; if it cannot proceed without the user, call finish_goal '
+        'with status "blocked"; otherwise make as much verified progress as you can '
+        "this iteration."
+    )
+
+
+def run_goal_loop(history: list, arg: str) -> None:
+    if not GOAL:
+        print("No standing goal. Set one first: /goal <description>")
+        return
+    max_iter, budget = 10, None
+    try:
+        for tok in arg.split():
+            if tok.startswith("$") or "." in tok:
+                budget = float(tok.lstrip("$"))
+            else:
+                max_iter = max(1, int(tok))
+    except ValueError:
+        print("usage: /loop [max_iterations] [budget_usd]   e.g. /loop 10 2.50")
+        return
+
+    LOOP_STATE["finished"] = None
+    start_cost = total_cost()
+    print(f"{BOLD}▶ autonomous loop: up to {max_iter} iteration(s)"
+          + (f", budget ${budget:.2f}" if budget is not None else "")
+          + f" — Ctrl+C stops it{RESET}")
+    for k in range(1, max_iter + 1):
+        spent = total_cost() - start_cost
+        if budget is not None and spent >= budget:
+            print(f"\n■ loop stopped: budget ${budget:.2f} exhausted (${spent:.2f} spent)")
+            return
+        print(f"\n{BOLD}― iteration {k}/{max_iter} (loop spend ${spent:.2f}){RESET}")
+        checkpoint = len(history)
+        history.append(user_text(loop_turn_prompt(k, max_iter)))
+        try:
+            orchestrator_turn(history)
+        except KeyboardInterrupt:
+            del history[checkpoint:]
+            print("\n■ loop interrupted — iteration rolled back, goal stays set")
+            return
+        except anthropic.APIStatusError as e:
+            del history[checkpoint:]
+            print(f"\n■ loop stopped on API error {e.status_code}: {e.message}")
+            return
+        except anthropic.APIConnectionError:
+            del history[checkpoint:]
+            print("\n■ loop stopped on a network error")
+            return
+        if LOOP_STATE["finished"]:
+            status, _summary = LOOP_STATE["finished"]
+            LOOP_STATE["finished"] = None
+            mark = "✔" if status == "achieved" else "■"
+            print(f"\n{BOLD}{mark} goal {status} after {k} iteration(s) "
+                  f"(loop spend ${total_cost() - start_cost:.2f}){RESET}")
+            return
+    print(f"\n■ loop ended: {max_iter} iteration(s) without finish_goal — "
+          "the goal stays set; run /loop again to continue")
+
+
 # ---------------------------------------------------------------- CLI
 
 def print_usage_tally() -> None:
@@ -694,9 +881,9 @@ def print_usage_tally() -> None:
         print("  (no API calls yet)")
         return
     total = 0.0
-    for model, (unc, cw, cr, out) in _usage.items():
-        pin, pout = PRICES.get(model, PRICES[ORCHESTRATOR_MODEL])
-        cost = (unc * pin + cw * 1.25 * pin + cr * 0.10 * pin + out * pout) / 1e6
+    for model, row in _usage.items():
+        unc, cw, cr, out = row
+        cost = row_cost(model, row)
         total += cost
         print(
             f"  {model}: {unc:,} in + {cw:,} cache-write + {cr:,} cache-read "
@@ -768,8 +955,9 @@ def main() -> None:
           f"worker {YELLOW}{WORKER_MODEL}{RESET}   "
           f"routine {MAGENTA}{ROUTINE_MODEL}{RESET}")
     print(f"  workspace: {WORKSPACE}   parallel subagents: up to {MAX_PARALLEL}")
-    print("  commands: /usage  /reset  /quit\n")
+    print("  commands: /goal  /loop  /usage  /reset  /quit\n")
 
+    global GOAL
     history: list = []
     while True:
         try:
@@ -783,10 +971,25 @@ def main() -> None:
             break
         if user == "/reset":
             history.clear()
-            print("(history cleared)")
+            print("(history cleared" + (", goal kept — /goal clear to unset)" if GOAL else ")"))
             continue
         if user == "/usage":
             print_usage_tally()
+            continue
+        if user == "/goal" or user.startswith("/goal "):
+            arg = user[len("/goal"):].strip()
+            if not arg:
+                print(f"  goal: {GOAL}" if GOAL else "  (no goal set — /goal <description>)")
+            elif arg.lower() in ("clear", "off", "none"):
+                GOAL = None
+                print("(goal cleared)")
+            else:
+                GOAL = arg
+                print("(goal set — every turn now works toward it; "
+                      "/loop [n] [budget] runs autonomously)")
+            continue
+        if user == "/loop" or user.startswith("/loop "):
+            run_goal_loop(history, user[len("/loop"):].strip())
             continue
 
         checkpoint = len(history)

@@ -46,10 +46,38 @@ environment or an `ant auth login` profile.
   loop caches its own growing history the same way. `/usage` itemizes
   uncached input, cache writes (1.25x), and cache reads (0.1x) per model.
 
+## Autonomous mode: `/goal` + `/loop`
+
+Set a standing objective, then let the council pursue it without you:
+
+```
+you> /goal build a fizzbuzz CLI with unit tests, all passing
+you> /loop 10 2.50        # up to 10 iterations, stop if loop spend exceeds $2.50
+```
+
+- `/goal <description>` registers the goal. From then on every orchestrator
+  turn receives it as trusted context (a mid-conversation `system` message on
+  an Opus 4.8 orchestrator; a `<system-reminder>` block on Fable 5, which
+  doesn't support mid-conversation system messages) — injected transiently
+  per request, after the cached prefix, so it never bloats history.
+- `/loop [max_iterations] [budget_usd]` feeds the orchestrator a synthetic
+  turn each cycle: review progress, delegate the next round of work to the
+  cheaper tiers, check the results. The top tier reasons and decides; the
+  worker/routine tiers do the hands-on work and report back.
+- The loop stops only when the orchestrator calls the `finish_goal` tool —
+  and an **"achieved" claim must survive an independent verifier**: a
+  fresh-context worker is spawned to adversarially audit the claim (re-read
+  files, re-run tests) and its refutation comes back as more work if the
+  claim doesn't hold. `"blocked"` stops the loop and reports what's needed.
+- Safety rails: iteration cap (default 10), optional dollar budget checked
+  against the live usage tally, and Ctrl+C rolls back the current iteration.
+
 ## REPL commands
 
+- `/goal` — set/show the standing goal (`/goal clear` to unset)
+- `/loop [n] [budget]` — pursue the goal autonomously (see above)
 - `/usage` — approximate token/cost tally per model
-- `/reset` — clear conversation history
+- `/reset` — clear conversation history (keeps the goal)
 - `/quit` — exit (prints the session tally)
 
 ## Notes
