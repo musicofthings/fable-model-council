@@ -26,6 +26,16 @@ Config (env vars):
     COUNCIL_WORKSPACE      default workspace offered at startup (default ~/council-workspace)
     COUNCIL_MAX_PARALLEL   max concurrent subagents (default 4)
 
+Council memory:
+    Workers maintain MEMORY.md at the workspace root (durable learnings, one
+    bullet each); its contents are injected into both system prompts at setup.
+
+Tools & connectors:
+    The worker has server-side web_search / web_fetch for research. Drop an
+    mcp.json in the workspace — a JSON list of {"name", "url",
+    "authorization_token"?} — to connect MCP servers (Linear, GitHub, ...);
+    their tools become available to the worker automatically.
+
 Commands inside the REPL:
     /goal    set/show the standing goal (/goal clear to unset)
     /loop    pursue the goal autonomously: /loop [max_iterations] [budget_usd]
@@ -202,6 +212,41 @@ def user_text(text: str) -> dict:
 ORCH_SYSTEM = ""
 ORCH_TOOLS: list = []
 WORKER_SYSTEM_BLOCKS: list = []
+MCP_SERVERS: list = []  # loaded from mcp.json in the workspace (or COUNCIL_MCP)
+
+MEMORY_CLIP = 6000  # max chars of MEMORY.md injected into the system prompts
+
+
+def read_memory() -> str:
+    try:
+        text = (WORKSPACE / "MEMORY.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if len(text) > MEMORY_CLIP:
+        text = text[:MEMORY_CLIP] + "\n...[memory clipped]"
+    return text
+
+
+def load_mcp_config() -> None:
+    """Read MCP server definitions from mcp.json in the workspace (or the file
+    named by COUNCIL_MCP): a JSON list of {name, url, authorization_token?}."""
+    global MCP_SERVERS
+    MCP_SERVERS = []
+    path = Path(os.environ.get("COUNCIL_MCP", str(WORKSPACE / "mcp.json")))
+    if not path.exists():
+        return
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(entries, list):
+            raise ValueError("expected a JSON list of server objects")
+        for e in entries:
+            server = {"type": "url", "name": e["name"], "url": e["url"]}
+            if e.get("authorization_token"):
+                server["authorization_token"] = e["authorization_token"]
+            MCP_SERVERS.append(server)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as e:
+        MCP_SERVERS = []
+        print(f"  (ignoring MCP config {path}: {e})")
 
 
 def configure_council(orch: str, worker: str, routine: str) -> None:
@@ -212,13 +257,25 @@ def configure_council(orch: str, worker: str, routine: str) -> None:
     ORCHESTRATOR_MODEL, WORKER_MODEL, ROUTINE_MODEL = orch, worker, routine
     wname, rname = model_name(worker), model_name(routine)
 
+    memory = read_memory()
+
     worker_system = f"""You are the hands-on worker of a model council, operating on the user's Windows machine (Git Bash is the shell behind the bash tool; prefer forward-slash paths).
 
-Your working directory is {WORKSPACE}. All file work must stay under it; paths outside are blocked by the harness.
+Your working directory is {WORKSPACE}. All file work must stay under it; paths outside are blocked by the harness. You also have server-side web_search and web_fetch tools for research — their results arrive automatically.
 
 Complete the task you are given end to end, then report what you did and the outcome, citing actual command output or file contents as evidence. If tests fail or a step errors, say so plainly with the output — never claim unverified success.
 
-Don't add features, refactors, or abstractions beyond what the task requires."""
+Don't add features, refactors, or abstractions beyond what the task requires.
+
+Shared council memory lives in MEMORY.md at the workspace root. When you learn something durable — a correction, a constraint, a confirmed approach and why it mattered — append it as one '- ' bullet. Don't duplicate existing entries; fix entries that prove wrong."""
+    if memory:
+        worker_system += f"\n\nCurrent council memory:\n{memory}"
+    if MCP_SERVERS:
+        worker_system += (
+            "\n\nConnected MCP servers: "
+            + ", ".join(s["name"] for s in MCP_SERVERS)
+            + " — their tools are available to you directly."
+        )
 
     WORKER_SYSTEM_BLOCKS = [
         {"type": "text", "text": worker_system, "cache_control": {"type": "ephemeral"}}
@@ -242,7 +299,13 @@ How to work:
 - When a worker reports back, check the result actually addresses the task before telling the user it's done. Report failures honestly, with the evidence the worker gave.
 - When you have enough information to act, act. If weighing a choice, give a recommendation, not a survey.
 - When a standing goal is set (it appears in a <council-goal> reminder), keep every turn pointed at it. In autonomous loop turns the user is away: never ask questions — decide, delegate, and verify. Only call finish_goal "achieved" when you have concrete evidence the goal is fully met, and "blocked" only when work truly cannot proceed without the user.
+- The council keeps a shared memory file, MEMORY.md at the workspace root; workers maintain it. When a task surfaces a durable learning, tell the worker to record it there.
 - Lead your replies with the outcome. Write readable prose, not fragments."""
+
+    if memory:
+        ORCH_SYSTEM += (
+            "\n\nCouncil memory (MEMORY.md contents at session start):\n" + memory
+        )
 
     task_spec = {
         "type": "object",
@@ -466,7 +529,23 @@ def run_text_editor(inp: dict) -> str:
 WORKER_TOOLS = [
     {"type": "bash_20250124", "name": "bash"},
     {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
+    # Server-side research tools (with dynamic filtering); results arrive
+    # inside the same response — no client-side execution.
+    {"type": "web_search_20260209", "name": "web_search", "max_uses": 8},
+    {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 8},
 ]
+
+
+def worker_request_kwargs() -> dict:
+    """Tools (+ MCP connector plumbing when servers are configured)."""
+    if not MCP_SERVERS:
+        return {"tools": WORKER_TOOLS}
+    return {
+        "tools": WORKER_TOOLS
+        + [{"type": "mcp_toolset", "mcp_server_name": s["name"]} for s in MCP_SERVERS],
+        "mcp_servers": MCP_SERVERS,
+        "betas": ["mcp-client-2025-11-20"],
+    }
 
 
 def run_worker(task: str, effort: str = "xhigh", quiet: bool = False) -> str:
@@ -475,16 +554,18 @@ def run_worker(task: str, effort: str = "xhigh", quiet: bool = False) -> str:
     else:
         print(f"\n{YELLOW}{BOLD}▶ {model_name(WORKER_MODEL)} worker (effort={effort}){RESET}")
     messages = [user_text(task)]
+    request_kwargs = worker_request_kwargs()
+    api = client.beta.messages if "betas" in request_kwargs else client.messages
     for _ in range(WORKER_MAX_ITERATIONS):
         refresh_cache_markers(messages)
-        with client.messages.stream(
+        with api.stream(
             model=WORKER_MODEL,
             max_tokens=64000,
             thinking={"type": "adaptive"},
             output_config={"effort": effort},
             system=WORKER_SYSTEM_BLOCKS,
-            tools=WORKER_TOOLS,
             messages=messages,
+            **request_kwargs,
         ) as stream:
             if quiet:
                 resp = stream.get_final_message()
@@ -497,6 +578,11 @@ def run_worker(task: str, effort: str = "xhigh", quiet: bool = False) -> str:
 
         if resp.stop_reason == "refusal":
             return "[the worker declined this task (safety refusal)]"
+
+        if resp.stop_reason == "pause_turn":
+            # Server-side tool loop paused; echo the turn back to resume.
+            messages.append({"role": "assistant", "content": resp.content})
+            continue
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
         if resp.stop_reason != "tool_use" or not tool_uses:
@@ -1004,6 +1090,7 @@ def choose_setup() -> None:
     worker = pick_model("worker", ROLE_CHOICES["worker"])
     routine = pick_model("routine", ROLE_CHOICES["routine"])
     pick_workspace()  # must precede configure_council: prompts embed the path
+    load_mcp_config()  # mcp.json lives in the chosen workspace
     configure_council(orch, worker, routine)
     print()
 
@@ -1017,7 +1104,14 @@ def main() -> None:
           f"worker {YELLOW}{WORKER_MODEL}{RESET}   "
           f"routine {MAGENTA}{ROUTINE_MODEL}{RESET}")
     print(f"  workspace: {WORKSPACE}   parallel subagents: up to {MAX_PARALLEL}")
-    print("  commands: /goal  /loop  /save  /resume  /usage  /reset  /quit\n")
+    extras = []
+    extras.append("memory: MEMORY.md loaded" if read_memory() else "memory: none yet")
+    extras.append(
+        "mcp: " + ", ".join(s["name"] for s in MCP_SERVERS) if MCP_SERVERS
+        else "mcp: none (add mcp.json to the workspace)"
+    )
+    print(f"  {'   '.join(extras)}")
+    print("  commands: /goal  /loop  /memory  /save  /resume  /usage  /reset  /quit\n")
 
     global GOAL
     history: list = []
@@ -1037,6 +1131,11 @@ def main() -> None:
             continue
         if user == "/usage":
             print_usage_tally()
+            continue
+        if user == "/memory":
+            mem = read_memory()
+            print(mem if mem else "(no MEMORY.md in the workspace yet — "
+                  "workers create it as they learn things)")
             continue
         if user == "/goal" or user.startswith("/goal "):
             arg = user[len("/goal"):].strip()

@@ -72,10 +72,39 @@ you> /loop 10 2.50        # up to 10 iterations, stop if loop spend exceeds $2.5
 - Safety rails: iteration cap (default 10), optional dollar budget checked
   against the live usage tally, and Ctrl+C rolls back the current iteration.
 
+## Council memory
+
+Workers maintain a shared `MEMORY.md` at the workspace root — one bullet per
+durable learning (corrections, constraints, confirmed approaches and why they
+mattered). Its contents are injected into both the orchestrator's and the
+worker's system prompts at setup, so successive sessions on the same workspace
+compound instead of starting cold. `/memory` shows the current contents
+(clipped to 6 KB when injected).
+
+## Tools & connectors
+
+- **Web research** — the worker carries server-side `web_search` and
+  `web_fetch` tools (the `_20260209` variants with dynamic filtering). They
+  run on Anthropic's infrastructure and their results arrive inside the same
+  response, so research goals need no extra client code.
+- **MCP connectors** — drop an `mcp.json` in the workspace (or point
+  `COUNCIL_MCP` at one): a JSON list of `{"name", "url",
+  "authorization_token"?}` entries. Each server is attached to the worker via
+  the MCP connector beta (`mcp-client-2025-11-20`) and its tools become
+  available automatically:
+
+  ```json
+  [
+    {"name": "linear", "url": "https://mcp.linear.app/mcp", "authorization_token": "..."},
+    {"name": "docs",   "url": "https://example.com/mcp"}
+  ]
+  ```
+
 ## REPL commands
 
 - `/goal` — set/show the standing goal (`/goal clear` to unset)
 - `/loop [n] [budget]` — pursue the goal autonomously (see above)
+- `/memory` — show the council memory file
 - `/save [name]` — write history + goal to a JSON file in the workspace
   (default `council-session.json`)
 - `/resume [name]` — restore a saved session, goal included

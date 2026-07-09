@@ -268,6 +268,18 @@
          reads and writes per model.</p>
     </div>
     <div class="feature">
+      <h3>Council memory</h3>
+      <p>Workers keep durable learnings in a shared <code>MEMORY.md</code>, injected into
+         every system prompt at startup — sessions on the same workspace compound instead
+         of starting cold.</p>
+    </div>
+    <div class="feature">
+      <h3>Web research &amp; MCP connectors</h3>
+      <p>The worker carries server-side <code>web_search</code>/<code>web_fetch</code>, and an
+         <code>mcp.json</code> in the workspace connects MCP servers (Linear, GitHub, …) whose
+         tools become available automatically.</p>
+    </div>
+    <div class="feature">
       <h3>Refusal fallbacks</h3>
       <p>A Fable 5 orchestrator ships with server-side fallbacks to Opus 4.8, so a
          safety-classifier false positive is transparently re-served instead of failing
